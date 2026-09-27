@@ -1,13 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { loadProject, saveProject } from './api';
+import { CrewPanel } from './CrewPanel';
 import { GraphCanvas, Selection } from './GraphCanvas';
-import { computeSchedule } from './schedule';
+import { computeCrewSchedule, computeSchedule } from './schedule';
 import { SidePanel } from './SidePanel';
 import { Timeline } from './Timeline';
 import { CommandNode, Project, ScheduleResult } from './types';
 import { useSimulation } from './useSimulation';
 
 const EMPTY: Project = { nodes: [], edges: [] };
+
+/** 兼容旧数据：班组人数缺省 1（正整数），口令用人数缺省 0（不超过班组人数的非负整数）。 */
+function normalizeProject(p: Project): Project {
+  const raw = p.crewSize;
+  const crewSize =
+    typeof raw === 'number' && Number.isInteger(raw) && raw >= 1 ? raw : 1;
+  return {
+    ...p,
+    crewSize,
+    nodes: p.nodes.map((n) => {
+      const c = n.crew;
+      const crew =
+        typeof c === 'number' && Number.isInteger(c) && c >= 0 ? Math.min(c, crewSize) : 0;
+      return { ...n, crew };
+    }),
+  };
+}
 
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
@@ -18,13 +36,19 @@ export default function App() {
   // 初始加载
   useEffect(() => {
     loadProject()
-      .then(setProject)
+      .then((p) => setProject(normalizeProject(p)))
       .catch((e) => setLoadError(String(e?.message ?? e)));
   }, []);
 
   // 实时重算最早执行时间
   const schedule: ScheduleResult | null = useMemo(
     () => (project ? computeSchedule(project) : null),
+    [project],
+  );
+
+  // 班组排程随编辑实时重算（有环时仅保留成环路径）
+  const crewSchedule = useMemo(
+    () => (project ? computeCrewSchedule(project) : null),
     [project],
   );
 
@@ -68,7 +92,7 @@ export default function App() {
       ...p,
       nodes: [
         ...p.nodes,
-        { id, name: `口令${p.nodes.length + 1}`, duration: 3, x: 120 + p.nodes.length * 30, y: 120 + p.nodes.length * 24 },
+        { id, name: `口令${p.nodes.length + 1}`, duration: 3, crew: 0, x: 120 + p.nodes.length * 30, y: 120 + p.nodes.length * 24 },
       ],
     }));
     setSelection({ type: 'node', id });
@@ -82,7 +106,7 @@ export default function App() {
   );
 
   const updateNode = useCallback(
-    (id: string, patch: Partial<Pick<CommandNode, 'name' | 'duration'>>) => {
+    (id: string, patch: Partial<Pick<CommandNode, 'name' | 'duration' | 'crew'>>) => {
       update((p) => ({ ...p, nodes: p.nodes.map((n) => (n.id === id ? { ...n, ...patch } : n)) }));
     },
     [update],
@@ -141,6 +165,18 @@ export default function App() {
   const setDeadlineSeconds = useCallback(
     (seconds: number) => {
       update((p) => ({ ...p, deadline: { enabled: p.deadline?.enabled ?? true, seconds } }));
+    },
+    [update],
+  );
+
+  // 班组人数为正整数；下调时同步压减各口令用人数，保持“用人数 ≤ 班组人数”
+  const setCrewSize = useCallback(
+    (crewSize: number) => {
+      update((p) => ({
+        ...p,
+        crewSize,
+        nodes: p.nodes.map((n) => ({ ...n, crew: Math.min(n.crew ?? 0, crewSize) })),
+      }));
     },
     [update],
   );
@@ -204,6 +240,21 @@ export default function App() {
             )}
           </span>
         )}
+        <span className="sep" />
+        <label className="crew-ctrl" title="班组总人数（正整数）；班组排程中同一时刻总用人数不超过该值">
+          班组人数
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={project.crewSize ?? 1}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isInteger(v) && v >= 1) setCrewSize(v);
+            }}
+          />
+          <span className="deadline-unit">人</span>
+        </label>
         <span className="spacer" />
         <span className={`save-state ${saveState}`}>
           {saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中…' : '保存失败'}
@@ -234,12 +285,15 @@ export default function App() {
           schedule={effectiveSchedule}
           selection={selection}
           cycle={cycle}
+          crewSize={project.crewSize ?? 1}
           onUpdateNode={updateNode}
           onUpdateEdge={updateEdge}
           onDeleteNode={deleteNode}
           onDeleteEdge={deleteEdge}
         />
       </div>
+
+      <CrewPanel project={project} result={crewSchedule} cycle={cycle} />
 
       <Timeline
         project={project}

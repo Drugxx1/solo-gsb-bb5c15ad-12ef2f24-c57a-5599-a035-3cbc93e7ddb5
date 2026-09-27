@@ -3,6 +3,8 @@ export interface CommandNode {
   name: string;
   /** 口令执行持续时长（秒） */
   duration: number;
+  /** 执行该口令占用的班组人数（非负整数；缺省为 0，兼容旧数据） */
+  crew?: number;
   x: number;
   y: number;
 }
@@ -28,6 +30,8 @@ export interface Project {
   edges: CommandEdge[];
   /** 开场截止设置；缺省表示未配置（兼容旧数据） */
   deadline?: DeadlineSetting;
+  /** 班组总人数（正整数；缺省为 1，兼容旧数据） */
+  crewSize?: number;
 }
 
 export interface CycleInfo {
@@ -62,6 +66,27 @@ export interface ScheduleResult {
   cycle?: CycleInfo;
   /** 启用截止时间且图无环时的倒排结果 */
   backward?: BackwardInfo;
+}
+
+/** 班组排程中一条口令的排定结果 */
+export interface CrewAssignment {
+  nodeId: string;
+  /** 排定开始时间（秒，相对排程零点） */
+  start: number;
+  /** 排定结束时间（秒）；占用按 [start, end) 计算 */
+  end: number;
+}
+
+/** 班组排程结果：容量约束下的不抢占可行排程 */
+export interface CrewScheduleResult {
+  ok: boolean;
+  /** 按排定先后列出的口令起止 */
+  assignments: CrewAssignment[];
+  /** 每个口令的排定开始时间（秒） */
+  starts: Record<string, number>;
+  /** 全部口令完成的总时长（秒） */
+  makespan: number;
+  cycle?: CycleInfo;
 }
 
 export type SimState = 'idle' | 'running' | 'paused' | 'finished';

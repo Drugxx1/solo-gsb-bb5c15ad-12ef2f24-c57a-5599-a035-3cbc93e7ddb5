@@ -9,7 +9,9 @@ interface SidePanelProps {
   selection: Selection | null;
   /** 当前图的环依赖（存在环时增量预演不可用，仅展示成环路径） */
   cycle?: CycleInfo;
-  onUpdateNode: (id: string, patch: { name?: string; duration?: number }) => void;
+  /** 班组总人数（正整数），用人数不可超过该值 */
+  crewSize: number;
+  onUpdateNode: (id: string, patch: { name?: string; duration?: number; crew?: number }) => void;
   onUpdateEdge: (id: string, patch: { minDelay?: number }) => void;
   onDeleteNode: (id: string) => void;
   onDeleteEdge: (id: string) => void;
@@ -46,6 +48,22 @@ export function SidePanel(props: SidePanelProps) {
             onChange={(e) => {
               const v = Number(e.target.value);
               if (Number.isFinite(v) && v >= 0) props.onUpdateNode(node.id, { duration: v });
+            }}
+          />
+        </label>
+        <label>
+          用人数（0–{props.crewSize} 的整数）
+          <input
+            type="number"
+            min={0}
+            max={props.crewSize}
+            step={1}
+            value={node.crew ?? 0}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isInteger(v) && v >= 0 && v <= props.crewSize) {
+                props.onUpdateNode(node.id, { crew: v });
+              }
             }}
           />
         </label>
@@ -130,6 +148,7 @@ export function SidePanel(props: SidePanelProps) {
         <li>拖动空白处平移，滚轮缩放</li>
         <li>每次修改都会实时重算最早执行时间</li>
         <li>工具栏勾选「开场截止」后按截止秒数倒排，浮动最小的链路即关键链</li>
+        <li>工具栏设置班组人数、口令侧栏设置用人数后，底部「班组排程」按容量实时重排</li>
         <li>选中口令或约束后可在侧栏「增量预演」试算，应用前不会保存</li>
       </ul>
       {schedule && (
@@ -370,7 +389,7 @@ function Delta({ value }: { value: number }) {
 }
 
 /** 成环路径：沿环上的边从首个节点开始走完一环。 */
-function CyclePath({ project, cycle }: { project: Project; cycle: CycleInfo }) {
+export function CyclePath({ project, cycle }: { project: Project; cycle: CycleInfo }) {
   const nodeById = new Map(project.nodes.map((n) => [n.id, n]));
   const edgeSet = new Set(cycle.edgeIds);
   const name = (id: string) => nodeById.get(id)?.name ?? id;

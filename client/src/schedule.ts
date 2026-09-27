@@ -1,4 +1,4 @@
-import { BackwardInfo, CommandEdge, CycleInfo, Project, ScheduleResult } from './types';
+import { BackwardInfo, CommandEdge, CrewAssignment, CrewScheduleResult, CycleInfo, Project, ScheduleResult } from './types';
 
 const EPS = 1e-9;
 
@@ -182,6 +182,148 @@ function findCycle(project: Project, indegree: Map<string, number>): CycleInfo |
     nodeIds: pathNodes.slice(cycleStart),
     edgeIds: pathEdges.slice(cycleStart),
   };
+}
+
+/**
+ * 班组排程：在现有前置完成与等待约束下，生成容量受限的不抢占可行排程。
+ *
+ * - 容量为班组人数（缺省 1），每条口令按其用人数（缺省 0）在 [开始, 结束) 区间内占人，
+ *   零时长口令不占人；同一时刻总用人数不得超过容量。
+ * - 口令的允许时刻 = 班组排程中全部前置的（排定结束 + 约束等待）的最大值，无前置为 0。
+ * - 每轮从全部前置已排定的口令中，按（允许时刻, 口令 ID 字典序）选一条，
+ *   放入不早于允许时刻且整个持续区间不超容量的最早位置（可填入已排定口令之间的空档）。
+ * - 图有环时不输出班组结果，沿用现有成环路径。
+ */
+export function computeCrewSchedule(project: Project): CrewScheduleResult {
+  const base = computeSchedule(project);
+  if (!base.ok) {
+    return { ok: false, assignments: [], starts: {}, makespan: 0, cycle: base.cycle };
+  }
+
+  const { nodes, edges } = project;
+  const capacity = normalizedCrewSize(project.crewSize);
+  const crewOf = new Map(nodes.map((n) => [n.id, normalizedCrew(n.crew)]));
+  const durationOf = new Map(nodes.map((n) => [n.id, n.duration]));
+
+  const indegree = new Map<string, number>();
+  const outgoing = new Map<string, { to: string; minDelay: number }[]>();
+  for (const n of nodes) {
+    indegree.set(n.id, 0);
+    outgoing.set(n.id, []);
+  }
+  for (const e of edges) {
+    if (!indegree.has(e.from) || !indegree.has(e.to)) continue;
+    indegree.set(e.to, (indegree.get(e.to) ?? 0) + 1);
+    outgoing.get(e.from)!.push({ to: e.to, minDelay: e.minDelay });
+  }
+
+  // allowed[id]：允许时刻；前置未排完时按已排定前置累积取最大，排完即定值
+  const allowed = new Map<string, number>();
+  const ready: string[] = [];
+  for (const [id, deg] of indegree) {
+    if (deg === 0) {
+      allowed.set(id, 0);
+      ready.push(id);
+    }
+  }
+
+  const assignments: CrewAssignment[] = [];
+  const starts: Record<string, number> = {};
+  const occupancy: { start: number; end: number; crew: number }[] = [];
+
+  while (ready.length > 0) {
+    // 按（允许时刻, 口令 ID 字典序）取最小
+    let best = 0;
+    for (let i = 1; i < ready.length; i++) {
+      const ta = allowed.get(ready[i])!;
+      const tb = allowed.get(ready[best])!;
+      if (ta < tb - EPS || (Math.abs(ta - tb) < EPS && ready[i] < ready[best])) best = i;
+    }
+    const id = ready.splice(best, 1)[0];
+
+    const duration = durationOf.get(id) ?? 0;
+    const crew = Math.min(crewOf.get(id) ?? 0, capacity);
+    const occupies = duration > 0 && crew > 0;
+    const start = occupies
+      ? earliestFit(occupancy, allowed.get(id)!, duration, crew, capacity)
+      : allowed.get(id)!;
+    const end = start + duration;
+
+    starts[id] = start;
+    assignments.push({ nodeId: id, start, end });
+    if (occupies) occupancy.push({ start, end, crew });
+
+    for (const { to, minDelay } of outgoing.get(id) ?? []) {
+      const cand = end + minDelay;
+      if (cand > (allowed.get(to) ?? 0)) allowed.set(to, cand);
+      const deg = indegree.get(to)! - 1;
+      indegree.set(to, deg);
+      if (deg === 0) ready.push(to);
+    }
+  }
+
+  let makespan = 0;
+  for (const a of assignments) makespan = Math.max(makespan, a.end);
+  return { ok: true, assignments, starts, makespan };
+}
+
+/** 班组人数：缺省 1，兜底为正整数。 */
+function normalizedCrewSize(v: number | undefined): number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 ? v : 1;
+}
+
+/** 口令用人数：缺省 0，兜底为非负整数。 */
+function normalizedCrew(v: number | undefined): number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
+}
+
+/**
+ * 不早于 earliest 且整个 [t, t+duration) 区间总用人数不超容量的最早时刻。
+ * 占用为分段常值函数，最早可行时刻必为 earliest 或某个已排定区间的结束时刻，
+ * 因此候选时刻有限，升序找到第一个可行者即可（全部占用结束之后必然可行）。
+ */
+function earliestFit(
+  occupancy: { start: number; end: number; crew: number }[],
+  earliest: number,
+  duration: number,
+  crew: number,
+  capacity: number,
+): number {
+  const candidates = new Set<number>([earliest]);
+  for (const o of occupancy) {
+    if (o.end > earliest) candidates.add(o.end);
+  }
+  const sorted = [...candidates].sort((a, b) => a - b);
+  for (const t of sorted) {
+    if (fitsAt(occupancy, t, duration, crew, capacity)) return t;
+  }
+  // 兜底：所有占用结束之后
+  let t = earliest;
+  for (const o of occupancy) t = Math.max(t, o.end);
+  return t;
+}
+
+/** 检查 [t, t+duration) 内每个占用变化点的总用人数是否不超容量。 */
+function fitsAt(
+  occupancy: { start: number; end: number; crew: number }[],
+  t: number,
+  duration: number,
+  crew: number,
+  capacity: number,
+): boolean {
+  const end = t + duration;
+  const usedAt = (p: number): number => {
+    let used = 0;
+    for (const o of occupancy) {
+      if (o.start <= p && p < o.end) used += o.crew;
+    }
+    return used;
+  };
+  if (usedAt(t) + crew > capacity) return false;
+  for (const o of occupancy) {
+    if (o.start > t && o.start < end && usedAt(o.start) + crew > capacity) return false;
+  }
+  return true;
 }
 
 /** 增量预演：内存中对单项改动（口令持续时长 / 约束等待秒数）试算 */

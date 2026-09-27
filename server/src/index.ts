@@ -6,6 +6,8 @@ interface CommandNode {
   id: string;
   name: string;
   duration: number;
+  /** 执行该口令占用的班组人数（非负整数；可选，缺省为 0，兼容旧数据） */
+  crew?: number;
   x: number;
   y: number;
 }
@@ -22,6 +24,8 @@ interface Project {
   edges: CommandEdge[];
   /** 开场截止设置（可选，兼容旧数据） */
   deadline?: { enabled: boolean; seconds: number };
+  /** 班组总人数（正整数；可选，缺省为 1，兼容旧数据） */
+  crewSize?: number;
 }
 
 const PORT = Number(process.env.PORT || 8080);
@@ -31,20 +35,20 @@ const CLIENT_DIST = process.env.CLIENT_DIST || path.join(__dirname, '..', '..', 
 
 /** 首次启动时的示例口令图（舞台换景流程）。 */
 function seedProject(): Project {
-  const node = (id: string, name: string, duration: number, x: number, y: number): CommandNode =>
-    ({ id, name, duration, x, y });
+  const node = (id: string, name: string, duration: number, crew: number, x: number, y: number): CommandNode =>
+    ({ id, name, duration, crew, x, y });
   const edge = (id: string, from: string, to: string, minDelay: number): CommandEdge =>
     ({ id, from, to, minDelay });
   return {
     nodes: [
-      node('n-curtain-down', '幕布落下', 3, 60, 220),
-      node('n-lights-dim', '灯光转暗', 2, 60, 340),
-      node('n-set-a-out', '布景A撤场', 8, 300, 160),
-      node('n-props-ready', '道具就位', 5, 300, 340),
-      node('n-set-b-in', '布景B上场', 10, 540, 160),
-      node('n-actors-ready', '演员就位', 4, 540, 340),
-      node('n-curtain-up', '幕布升起', 3, 780, 240),
-      node('n-lights-up', '灯光亮起', 2, 780, 360),
+      node('n-curtain-down', '幕布落下', 3, 1, 60, 220),
+      node('n-lights-dim', '灯光转暗', 2, 1, 60, 340),
+      node('n-set-a-out', '布景A撤场', 8, 2, 300, 160),
+      node('n-props-ready', '道具就位', 5, 1, 300, 340),
+      node('n-set-b-in', '布景B上场', 10, 2, 540, 160),
+      node('n-actors-ready', '演员就位', 4, 1, 540, 340),
+      node('n-curtain-up', '幕布升起', 3, 1, 780, 240),
+      node('n-lights-up', '灯光亮起', 2, 1, 780, 360),
     ],
     edges: [
       edge('e1', 'n-curtain-down', 'n-set-a-out', 1),
@@ -58,6 +62,8 @@ function seedProject(): Project {
     ],
     // 示例流程最短工期为 34s，默认给出该值便于启用后直接看到关键链
     deadline: { enabled: false, seconds: 34 },
+    // 示例班组 2 人：撤场/上场占满班组时会与并行口令错开
+    crewSize: 2,
   };
 }
 
@@ -65,11 +71,23 @@ function isValidProject(p: unknown): p is Project {
   if (typeof p !== 'object' || p === null) return false;
   const proj = p as Project;
   if (!Array.isArray(proj.nodes) || !Array.isArray(proj.edges)) return false;
+  // 班组人数：可选，必须为正整数（缺省按 1 处理，兼容旧数据）
+  if (proj.crewSize !== undefined) {
+    if (typeof proj.crewSize !== 'number' || !Number.isInteger(proj.crewSize) || proj.crewSize < 1) {
+      return false;
+    }
+  }
+  const capacity = proj.crewSize ?? 1;
   const ids = new Set<string>();
   for (const n of proj.nodes) {
     if (!n || typeof n.id !== 'string' || typeof n.name !== 'string') return false;
     if (typeof n.duration !== 'number' || !isFinite(n.duration) || n.duration < 0) return false;
     if (typeof n.x !== 'number' || typeof n.y !== 'number') return false;
+    // 用人数：可选，必须为不超过班组人数的非负整数（缺省按 0 处理）
+    if (n.crew !== undefined) {
+      if (typeof n.crew !== 'number' || !Number.isInteger(n.crew) || n.crew < 0) return false;
+      if (n.crew > capacity) return false;
+    }
     if (ids.has(n.id)) return false;
     ids.add(n.id);
   }
