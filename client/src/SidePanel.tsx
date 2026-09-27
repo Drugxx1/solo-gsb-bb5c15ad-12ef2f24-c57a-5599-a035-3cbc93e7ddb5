@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { CycleInfo, Project, ScheduleResult } from './types';
 import { Selection } from './GraphCanvas';
 import { runWhatIf } from './schedule';
+import { CyclePath } from './CyclePath';
 
 interface SidePanelProps {
   project: Project;
@@ -9,7 +10,7 @@ interface SidePanelProps {
   selection: Selection | null;
   /** 当前图的环依赖（存在环时增量预演不可用，仅展示成环路径） */
   cycle?: CycleInfo;
-  onUpdateNode: (id: string, patch: { name?: string; duration?: number }) => void;
+  onUpdateNode: (id: string, patch: { name?: string; duration?: number; crew?: number }) => void;
   onUpdateEdge: (id: string, patch: { minDelay?: number }) => void;
   onDeleteNode: (id: string) => void;
   onDeleteEdge: (id: string) => void;
@@ -17,6 +18,7 @@ interface SidePanelProps {
 
 export function SidePanel(props: SidePanelProps) {
   const { project, schedule, selection } = props;
+  const crewSize = project.crewSize !== undefined && project.crewSize >= 1 ? project.crewSize : 1;
 
   if (selection?.type === 'node') {
     const node = project.nodes.find((n) => n.id === selection.id);
@@ -26,6 +28,7 @@ export function SidePanel(props: SidePanelProps) {
     const latestAt = backward?.latestStarts[node.id];
     const floatAt = backward?.floats[node.id];
     const isCritical = backward?.criticalNodeIds.includes(node.id) ?? false;
+    const crewDemand = node.crew ?? 0;
     return (
       <div className="side-panel">
         <h3>口令属性</h3>
@@ -49,6 +52,28 @@ export function SidePanel(props: SidePanelProps) {
             }}
           />
         </label>
+        <label>
+          用人数（0–{crewSize} 人）
+          <input
+            type="number"
+            min={0}
+            max={crewSize}
+            step={1}
+            value={crewDemand}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isInteger(v) && v >= 0 && v <= crewSize) {
+                props.onUpdateNode(node.id, { crew: v });
+              }
+            }}
+          />
+        </label>
+        {node.duration > 0 && crewDemand === 0 && (
+          <p className="hint">用人数为 0：班组排程中该口令不占人手。</p>
+        )}
+        {node.duration === 0 && (
+          <p className="hint">零时长口令不占人手，班组排程直接排在允许开始时刻。</p>
+        )}
         <p className="hint">
           最早开始：{startAt !== undefined ? `${round1(startAt)}s` : '—'}
           {startAt !== undefined && `，最早完成：${round1(startAt + node.duration)}s`}
@@ -129,6 +154,7 @@ export function SidePanel(props: SidePanelProps) {
         <li>点击口令或约束线进行选中与编辑</li>
         <li>拖动空白处平移，滚轮缩放</li>
         <li>每次修改都会实时重算最早执行时间</li>
+        <li>工具栏设置班组人数、口令侧栏设置用人数，底部「班组排程」按容量重算</li>
         <li>工具栏勾选「开场截止」后按截止秒数倒排，浮动最小的链路即关键链</li>
         <li>选中口令或约束后可在侧栏「增量预演」试算，应用前不会保存</li>
       </ul>
@@ -367,40 +393,6 @@ function WhatIfOutcome(props: OutcomeProps) {
 function Delta({ value }: { value: number }) {
   if (Math.abs(value) < 1e-9) return <span className="delta-zero"> （不变）</span>;
   return <span className="delta-up"> （{value > 0 ? '+' : '−'}{round1(Math.abs(value))}s）</span>;
-}
-
-/** 成环路径：沿环上的边从首个节点开始走完一环。 */
-function CyclePath({ project, cycle }: { project: Project; cycle: CycleInfo }) {
-  const nodeById = new Map(project.nodes.map((n) => [n.id, n]));
-  const edgeSet = new Set(cycle.edgeIds);
-  const name = (id: string) => nodeById.get(id)?.name ?? id;
-
-  const chain: string[] = [];
-  const start = cycle.nodeIds[0];
-  if (start) {
-    chain.push(start);
-    let cur = start;
-    for (let i = 0; i < cycle.edgeIds.length; i++) {
-      const e = project.edges.find((ed) => edgeSet.has(ed.id) && ed.from === cur);
-      if (!e) break;
-      chain.push(e.to);
-      cur = e.to;
-    }
-  }
-
-  return (
-    <div className="cycle-path">
-      <p className="hint">成环路径（{cycle.nodeIds.length} 条口令）：</p>
-      <p className="cycle-path-line">
-        {chain.map((id, i) => (
-          <span key={`${id}-${i}`} className="whatif-hop">
-            {i > 0 && <span className="whatif-hop-edge"> → </span>}
-            <span className="whatif-hop-node hop-cycle">{name(id)}</span>
-          </span>
-        ))}
-      </p>
-    </div>
-  );
 }
 
 function round1(v: number): string {

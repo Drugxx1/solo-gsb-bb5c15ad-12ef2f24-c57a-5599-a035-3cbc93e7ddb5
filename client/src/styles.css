@@ -90,6 +90,27 @@ html, body, #root {
 }
 .deadline-ctrl input[type='number']:focus { outline: none; border-color: var(--accent); }
 .deadline-unit { color: var(--muted); }
+
+/* 班组人数控件 */
+.crew-size-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: default;
+}
+.crew-size-ctrl input[type='number'] {
+  width: 64px;
+  padding: 5px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+.crew-size-ctrl input[type='number']:focus { outline: none; border-color: var(--accent); }
 .overrun {
   color: var(--red);
   font-weight: 600;
@@ -336,6 +357,62 @@ button.danger { background: transparent; border-color: var(--red); color: var(--
   word-break: break-word;
   margin: 4px 0 0;
 }
+
+/* ---------- 班组排程面板 ---------- */
+.crew-panel {
+  height: 210px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 8px 12px 10px;
+}
+.crew-panel.empty {
+  align-items: flex-start;
+  height: auto;
+  flex-shrink: 0;
+}
+.crew-panel h3 { margin: 0; font-size: 13px; color: var(--text); }
+.crew-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.crew-meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.crew-meta b { color: var(--text); font-weight: 600; }
+.crew-rule { flex-basis: 100%; line-height: 1.5; }
+.crew-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 14px;
+}
+.crew-table {
+  flex-shrink: 0;
+  border-collapse: collapse;
+  font-size: 12px;
+  display: block;
+  overflow-y: auto;
+  max-width: 300px;
+}
+.crew-table thead { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.crew-table th,
+.crew-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 3px 10px 3px 0;
+  text-align: left;
+  white-space: nowrap;
+}
+.crew-table th { color: var(--muted); font-weight: 500; }
+.crew-table td.num,
+.crew-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.crew-gantt-scroll { flex: 1; min-width: 0; overflow: auto; }
+.crew-bar { fill: #46608f; }
+.crew-bar.zero-crew { fill: #3a4358; opacity: 0.7; }
+.crew-zero-mark { stroke: var(--muted); stroke-width: 2; }
 
 /* ---------- 甘特图 ---------- */
 .timeline {

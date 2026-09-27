@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { loadProject, saveProject } from './api';
+import { CrewPanel } from './CrewPanel';
 import { GraphCanvas, Selection } from './GraphCanvas';
-import { computeSchedule } from './schedule';
+import { computeCrewSchedule, computeSchedule, normalizeCrewSize } from './schedule';
 import { SidePanel } from './SidePanel';
 import { Timeline } from './Timeline';
-import { CommandNode, Project, ScheduleResult } from './types';
+import { CommandNode, CrewScheduleResult, Project, ScheduleResult } from './types';
 import { useSimulation } from './useSimulation';
 
 const EMPTY: Project = { nodes: [], edges: [] };
@@ -25,6 +26,12 @@ export default function App() {
   // 实时重算最早执行时间
   const schedule: ScheduleResult | null = useMemo(
     () => (project ? computeSchedule(project) : null),
+    [project],
+  );
+
+  // 班组排程随编辑重算（原排程与模拟规则不变；有环时结果内只含成环路径）
+  const crewSchedule: CrewScheduleResult | null = useMemo(
+    () => (project ? computeCrewSchedule(project) : null),
     [project],
   );
 
@@ -82,7 +89,7 @@ export default function App() {
   );
 
   const updateNode = useCallback(
-    (id: string, patch: Partial<Pick<CommandNode, 'name' | 'duration'>>) => {
+    (id: string, patch: Partial<Pick<CommandNode, 'name' | 'duration' | 'crew'>>) => {
       update((p) => ({ ...p, nodes: p.nodes.map((n) => (n.id === id ? { ...n, ...patch } : n)) }));
     },
     [update],
@@ -145,6 +152,21 @@ export default function App() {
     [update],
   );
 
+  // 班组人数（正整数）：缩小时把超过新容量的用人数夹紧，保证“用人数 ≤ 班组人数”恒成立
+  const setCrewSize = useCallback(
+    (size: number) => {
+      if (!Number.isInteger(size) || size < 1) return;
+      update((p) => ({
+        ...p,
+        crewSize: size,
+        nodes: p.nodes.map((n) =>
+          n.crew !== undefined && n.crew > size ? { ...n, crew: size } : n,
+        ),
+      }));
+    },
+    [update],
+  );
+
   if (loadError) {
     return <div className="boot-message">加载失败：{loadError}</div>;
   }
@@ -156,6 +178,7 @@ export default function App() {
   const canStart = project.nodes.length > 0 && sim.state !== 'running' && sim.state !== 'paused';
   const deadline = project.deadline;
   const backward = effectiveSchedule?.backward;
+  const crewSize = normalizeCrewSize(project.crewSize);
 
   return (
     <div className="app">
@@ -204,6 +227,21 @@ export default function App() {
             )}
           </span>
         )}
+        <span className="sep" />
+        <label className="crew-size-ctrl" title="班组排程可用人数（正整数）">
+          班组人数
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={crewSize}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isInteger(v) && v >= 1) setCrewSize(v);
+            }}
+          />
+          <span className="deadline-unit">人</span>
+        </label>
         <span className="spacer" />
         <span className={`save-state ${saveState}`}>
           {saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中…' : '保存失败'}
@@ -240,6 +278,8 @@ export default function App() {
           onDeleteEdge={deleteEdge}
         />
       </div>
+
+      {crewSchedule && <CrewPanel project={project} result={crewSchedule} />}
 
       <Timeline
         project={project}

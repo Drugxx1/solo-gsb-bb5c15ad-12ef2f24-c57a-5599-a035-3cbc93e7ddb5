@@ -1,4 +1,4 @@
-import { BackwardInfo, CommandEdge, CycleInfo, Project, ScheduleResult } from './types';
+import { BackwardInfo, CommandEdge, CrewScheduleResult, CycleInfo, Project, ScheduleResult } from './types';
 
 const EPS = 1e-9;
 
@@ -58,6 +58,161 @@ export function computeSchedule(project: Project): ScheduleResult {
   }
 
   return { ok: false, starts, makespan: 0, cycle: findCycle(project, indegree) };
+}
+
+/**
+ * 班组排程：在前置完成与等待约束之上叠加容量约束的不抢占可行排程（串行调度方案）。
+ *
+ * 每轮从“全部前置均已排定”的口令中，先按前置允许开始时刻
+ *   ready(v) = max(0, max over 前置 e:u→v 的 start(u)+duration(u)+minDelay(e))
+ * 排序，相同再按口令 id 字典序，选出一个口令；
+ * 随后将其放入不早于 ready(v)、且在整个 [s, s+duration(v)) 内
+ * 已排定口令的用人数之和不超过班组人数的最早位置——可填入已排定口令之间的空档。
+ * 占用按 [开始, 结束) 计算；零时长口令不占人，直接排在其允许开始时刻。
+ *
+ * 该过程不移动任何已排定口令（不抢占）。图中存在环时复用与原排程相同的成环路径，
+ * 不输出班组排程结果。
+ */
+export function computeCrewSchedule(project: Project): CrewScheduleResult {
+  const { nodes, edges } = project;
+  const capacity = normalizeCrewSize(project.crewSize);
+  const durationOf = new Map(nodes.map((n) => [n.id, n.duration]));
+  const demandOf = new Map(nodes.map((n) => [n.id, n.crew ?? 0]));
+
+  const indegree = new Map<string, number>();
+  const incoming = new Map<string, { from: string; minDelay: number }[]>();
+  for (const n of nodes) {
+    indegree.set(n.id, 0);
+    incoming.set(n.id, []);
+  }
+  for (const e of edges) {
+    if (!indegree.has(e.from) || !indegree.has(e.to)) continue;
+    indegree.set(e.to, (indegree.get(e.to) ?? 0) + 1);
+    incoming.get(e.to)!.push({ from: e.from, minDelay: e.minDelay });
+  }
+
+  const starts: Record<string, number> = {};
+  const ends: Record<string, number> = {};
+  /** 已排定且占人的口令（零时长不进表） */
+  const placed: { id: string; start: number; end: number; demand: number }[] = [];
+
+  // 全部前置已排定的口令：ready 时刻可直接由已排定前置算出
+  const readyOf = (id: string): number => {
+    let r = 0;
+    for (const { from, minDelay } of incoming.get(id) ?? []) {
+      const candidate = (ends[from] ?? 0) + minDelay;
+      if (candidate > r) r = candidate;
+    }
+    return r;
+  };
+
+  const ready = new Set<string>();
+  for (const [id, deg] of indegree) {
+    if (deg === 0) ready.add(id);
+  }
+
+  let processed = 0;
+  while (ready.size > 0) {
+    let chosen: string | undefined;
+    let chosenReady = Infinity;
+    for (const id of ready) {
+      const r = readyOf(id);
+      if (r < chosenReady - EPS || (Math.abs(r - chosenReady) < EPS && (chosen === undefined || id < chosen))) {
+        chosen = id;
+        chosenReady = r;
+      }
+    }
+    const id = chosen!;
+    ready.delete(id);
+    processed++;
+
+    const duration = durationOf.get(id) ?? 0;
+    // 服务端校验保证用人数 ≤ 班组人数；此处再夹紧，避免异常旧数据导致无可行位置
+    const demand = Math.min(demandOf.get(id) ?? 0, capacity);
+    const start = earliestCrewStart(placed, capacity, chosenReady, duration, demand);
+    starts[id] = start;
+    ends[id] = start + duration;
+    if (duration > EPS && demand > 0) {
+      placed.push({ id, start, end: start + duration, demand });
+    }
+
+    // 该口令排定后，后继可能进入“全部前置已排定”集合
+    for (const e of edges) {
+      if (e.from !== id || !indegree.has(e.to)) continue;
+      const deg = indegree.get(e.to)! - 1;
+      indegree.set(e.to, deg);
+      if (deg === 0) ready.add(e.to);
+    }
+  }
+
+  if (processed !== nodes.length) {
+    return { ok: false, capacity, starts: {}, ends: {}, demand: {}, makespan: 0, cycle: findCycle(project, indegree) };
+  }
+
+  let makespan = 0;
+  for (const n of nodes) makespan = Math.max(makespan, ends[n.id] ?? 0);
+  const demand: Record<string, number> = {};
+  for (const n of nodes) demand[n.id] = demandOf.get(n.id) ?? 0;
+  return { ok: true, capacity, starts, ends, demand, makespan };
+}
+
+/** 班组人数（正整数）；缺省或非法时按旧数据默认 1。 */
+export function normalizeCrewSize(crewSize: number | undefined): number {
+  return typeof crewSize === 'number' && Number.isFinite(crewSize) && crewSize >= 1 ? crewSize : 1;
+}
+
+/**
+ * 求不早于 ready、整个 [t, t+duration) 内总用人数不超过 capacity 的最早 t。
+ * 不抢占：仅在已排定口令形成的负载曲线上寻找可行窗口，允许填入空档。
+ * 从 ready 起扫描；遇到首个超载段就把起点整体滑到该超载段结束再继续
+ * （更早的位置无法绕开首个超载段）。零时长不占人，恒可排在 ready。
+ */
+function earliestCrewStart(
+  placed: { start: number; end: number; demand: number }[],
+  capacity: number,
+  ready: number,
+  duration: number,
+  demand: number,
+): number {
+  if (duration <= EPS || demand <= 0) return ready;
+
+  let t = ready;
+  for (;;) {
+    // 候选窗口 [t, t+duration) 内的已排定负载事件；占用按 [开始, 结束) 计算
+    const deltas = new Map<number, number>();
+    for (const p of placed) {
+      if (p.start >= t + duration - EPS || p.end <= t + EPS) continue;
+      if (p.start > t + EPS) deltas.set(p.start, (deltas.get(p.start) ?? 0) + p.demand);
+      if (p.end < t + duration - EPS) deltas.set(p.end, (deltas.get(p.end) ?? 0) - p.demand);
+    }
+    // 同坐标事件合并（结束减员与开始增员同点时先减后加，符合半开区间 [s,e)）
+    const events = [...deltas.entries()]
+      .map(([at, delta]) => ({ at, delta }))
+      .sort((a, b) => a.at - b.at);
+
+    // t 处的已排定负载作为基线，沿事件点找首个超载区间 [overStart, overEnd)
+    let load = 0;
+    for (const p of placed) {
+      if (p.start <= t + EPS && p.end > t + EPS && p.start < t + duration - EPS) load += p.demand;
+    }
+    let overStart: number | undefined;
+    let overEnd: number | undefined;
+    if (load + demand > capacity) overStart = t;
+    for (const { at, delta } of events) {
+      load += delta;
+      if (overStart === undefined) {
+        if (load + demand > capacity) overStart = at;
+      } else if (load + demand <= capacity) {
+        overEnd = at;
+        break;
+      }
+    }
+    if (overStart === undefined) return t; // 整个窗口均不超载
+
+    // 任何早于超载段结束的起点都会与该超载区间相交，故最早只能整体滑到 overEnd；
+    // 超载延续到候选窗口末端之外时滑到窗口末端，下一轮重新扫描新进入的已排定口令
+    t = overEnd ?? t + duration;
+  }
 }
 
 /**
